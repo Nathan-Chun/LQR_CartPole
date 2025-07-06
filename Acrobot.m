@@ -1,0 +1,151 @@
+clear all; clc;
+
+% number of inputs and outputs
+nx = 4; % [theta1, theta2, dtheta1, dtheta2]
+nu = 1; % [F]
+
+% Target state
+xf = [0; 0; 0; 0];
+uf = [0];
+
+% IC
+x0 = [0.1, 0.003, 0, 0];
+
+% Simulation params
+dt = 0.01;
+tf = 5.0;
+t_vec = 0:dt:tf;
+N = length(t_vec);
+X = cell(1,N);
+for i=1:N
+    X{i} = zeros(nx,1);
+end
+X{1} = x0;
+
+% Physical system params [m1, m2, l1, l2]
+params = [1, 1, 1, 1];
+
+Q = diag([10, 10, 1, 1]);
+R = [1];
+
+[~, A, B] = dynamics(params, xf, uf)
+
+% MATLAB LQR
+% sys = linearize('Acrobot_model', [0,0,0,0]);  % or linmod
+% A_mod = sys.A;
+% B_mod = sys.B;
+% K_m = lqr(A_mod,B_mod, Q, R);
+
+% Custom LQR
+[S, K] = ihlqr(A, B, Q, R)
+% disp(norm(K_m - K))
+
+%% Simulate
+
+for k=1:N-1
+    xk = X{k};
+    u = -K *xk';
+    xnext = rk4(@(x,u) dynamics(params, x, u), xk', u, dt);
+    X{k+1} = xnext';
+end
+
+X_mat = cell2mat(X');
+
+%Plot
+figure;
+subplot(2,1,1);
+plot(t_vec, X_mat(:,1:2)); ylabel('Angles(rad)');
+legend('\theta_1', '\theta_2');
+
+subplot(2,1,2);
+plot(t_vec, X_mat(:, 3:4)); ylabel('Angular velocities (rad/s)')
+xlabel('Time(s)');
+legend({'$\dot{\theta}_1$', '$\dot{\theta}_2$'}, "Interpreter", "latex")
+
+
+%% functions
+
+% Dynamics
+function [dx, A_lin, B_lin] = dynamics(params, x, u)
+    
+    %params
+    m1 = params(1);
+    m2 = params(2);
+    l1 = params(3);
+    l2 = params(4);
+    g = 9.81;
+    q = x(1:2);
+    qd = x(3:4);
+
+    % Trig shorthand
+    s1 = sin(q(1));
+    c1 = cos(q(1));
+    s2 = sin(q(2));
+    c2 = cos(q(2));
+    s12 = sin(q(1)+q(2));
+
+    % Manipulator dynamics
+    % I1 = (1/12)*m1*l1^2;
+    % I2 = (1/12)*m2*l2^2;
+    I1 = 1;
+    I2 = 1;
+    % H = [I1+I2+m2*l1^2+2*m2*l1*(l2/2)*c2, I2+m2*l1*(l2/2)*c2;
+    %      I2+m2*l1*(l2/2)*c2,              I2];
+   H = [I1+ I2 + m2*l1^2 + 2*m2*l1*l2/2  I2 + m2*l1*l2/2*c2;
+    I2 + m2*l1*l2/2*c2  I2];
+
+    C = [-2*m2*l1*(l2/2)*s2*qd(1), -m2*l1*(l2/2)*s2*qd(2);
+         m2*l1*(l2/2)*s2*qd(1),     0];
+
+    G = [m1*g*(l1/2)*s1+m2*g*(l1*s1+(l2/2)*s12);
+         m2*g*(l2/2)*s12];
+
+    B = [0;1];
+   
+    qdd = H\(-C*qd - G +B*u);
+    dx = [qd(1); qd(2); qdd(1); qdd(2)];
+    
+    % Linearized around x = [pi;0;0;0]
+    dG = [g*(m1*l1/2+m2*l1+m2*l2/2), m2*g*l2/2;
+       m2*g*l2/2, m2*g*l2/2];
+    A_lin = [zeros(2), eye(2);  H\dG, zeros(2)];
+    B_lin = [zeros(2,1); H\B];
+
+    % lin = [A_lin, B_lin];
+
+end
+
+% Runga-kutta
+function xnew = rk4(f, x, u, dt)
+    k1 = dt * f(x, u);
+    k2 = dt * f(x+k1/2, u);
+    k3 = dt * f(x+k2/2, u);
+    k4 = dt * f(x+k3, u);
+    xnew = x + (1/6)*(k1+2*k2+2*k3+k4);
+end
+
+% infinite horizon LQR
+function [S, K] = ihlqr(A, B, Q, R, max_iter, tol)
+    % Defaults
+    if nargin<6
+        tol = 1e-6;
+    end
+    if nargin<5
+        max_iter = 1000;
+    end
+    
+    [nx, nu] = size(B);
+
+    S = Q*1.0;
+    for ricatti_iter = 1:max_iter
+        K = (R+B'*S*B)\(B'*S*A);
+        newS = Q + K'*R*K + (A - B*K)'*S*(A - B*K);
+        if norm(S-newS, Inf) < tol
+            fprintf("Converged after %d iterations\n", ricatti_iter);
+            S = newS; 
+            return;
+        end
+        S = newS;
+    end
+    error("Did not converge")
+end
